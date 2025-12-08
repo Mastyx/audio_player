@@ -647,7 +647,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_file_browser(f, app, chunks[0]);
     render_player_info(f, app, chunks[1]);
 }
-// parte sinistra relativa alla visone dei file
+// parte sinistra relativa
 fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .items
