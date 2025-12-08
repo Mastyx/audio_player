@@ -210,7 +210,8 @@ impl AudioPlayer {
     }
 }
 
-// interfaccia utente e logica di controllo
+// Struttura principale della Tui
+//
 struct App {
     current_dir: PathBuf,
     items: Vec<PathBuf>,
@@ -230,6 +231,7 @@ struct App {
 }
 
 impl App {
+    // per la creazione di una nuova istanza
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let current_dir = std::env::current_dir()?;
         let audio_player = AudioPlayer::new()?;
@@ -255,11 +257,12 @@ impl App {
         app.list_state.select(Some(0));
         Ok(app)
     }
-
+    // carica il contenuto della directory corrente
     fn load_directory(&mut self) -> io::Result<()> {
         self.items.clear();
 
         if self.current_dir.parent().is_some() {
+            // per la tornare alla cartella superiore
             self.items.push(PathBuf::from(".."));
         }
 
@@ -281,7 +284,7 @@ impl App {
         self.items.sort();
         Ok(())
     }
-
+    // selezioniamo l''elemento successivo nella lista
     fn next(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
@@ -295,7 +298,7 @@ impl App {
         };
         self.list_state.select(Some(i));
     }
-
+    // per l'elemento precedente
     fn previous(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
@@ -309,7 +312,7 @@ impl App {
         };
         self.list_state.select(Some(i));
     }
-
+    // gestione della cartella Enter per riprodurla
     fn select_item(&mut self) -> io::Result<()> {
         if let Some(i) = self.list_state.selected() {
             if i < self.items.len() {
@@ -332,7 +335,7 @@ impl App {
         }
         Ok(())
     }
-
+    // avvia la riproduzione del brano all'indice specificato
     fn play_track_at_index(&mut self, index: usize) {
         if index < self.items.len() {
             let path = &self.items[index];
@@ -362,6 +365,8 @@ impl App {
         }
     }
 
+    // riproduce il brano successivo nella cartella
+    // o torna all'inizio
     fn play_next_track(&mut self) {
         if let Some(current_idx) = self.current_track_index {
             // Trova il prossimo file audio
@@ -386,7 +391,7 @@ impl App {
         // Nessun brano successivo trovato
         self.is_playing = false;
     }
-
+    // riproduce il brano precedente
     fn play_previous_track(&mut self) {
         if let Some(current_idx) = self.current_track_index {
             // Trova il precedente file audio
@@ -401,11 +406,11 @@ impl App {
             }
         }
     }
-
+    // toggle per attiva/disattiva la riproduzione continua
     fn toggle_continuous_play(&mut self) {
         self.continuous_play = !self.continuous_play;
     }
-
+    // play o pause del brano
     fn toggle_playback(&mut self) {
         if self.selected_track.is_some() {
             if self.is_playing {
@@ -421,7 +426,7 @@ impl App {
             }
         }
     }
-
+    // aggiorna lo stato della riproduzione
     fn update_playback(&mut self) {
         let was_playing = self.is_playing;
         self.is_playing = self.audio_player.is_playing();
@@ -451,7 +456,7 @@ impl App {
             }
         }
     }
-
+    // Esegue l'analisi FFT in tenpo reale
     fn analyze_audio(&mut self) {
         const FFT_SIZE: usize = 2048;
         let samples = self.audio_player.get_audio_samples(FFT_SIZE);
@@ -569,16 +574,17 @@ impl App {
             }
         }
     }
-
+    // formattiamo Duration in MM:SS
     fn format_duration(duration: Duration) -> String {
         let secs = duration.as_secs();
         let mins = secs / 60;
         let secs = secs % 60;
-        format!("{:02}:{:02}", mins, secs)
+        format!("{:02}:{:02}", mins, secs) // stringa restituita 
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // attiva modalita raw
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -587,7 +593,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new()?;
     let res = run_app(&mut terminal, &mut app);
-
+    // ripristina terminale all'uscita
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -603,6 +609,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// loop principale dell'applicazioni TUI
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
