@@ -916,4 +916,3 @@ fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 }
-
