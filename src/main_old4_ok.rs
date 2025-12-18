@@ -1,14 +1,4 @@
-// player  audio 100% rust
-/*
-insert dependencies in cargo.toml
-
-[dependencies]
-crossterm = "0.29.0"
-ratatui = "0.29.0"
-rodio = "0.19"
-rustfft = "6.2"
-*/
-
+// palyer audio 100% rust 📁
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -34,26 +24,26 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Wrapper that captures audio samples from an underlying rodio Source.
-/// It stores the samples in a shared ring buffer (Arc<Mutex<VecDeque<f32>>>)
-/// for real-time FFT visualization while passing the samples unchanged
-/// to the audio output. The buffer is limited to a fixed size (8192 samples).
+// Wrapper per catturare i campioni audio
+//agisce come un wrapper per una sorgente audio
+//cattura i campioni audio (f32) utilizzando un Arc<Mutex>
+//imlementa il trait Iterator e Source  di rodio
+//per intercettare i campioni audio prima che
+//raggiungano il sink audio
+//buffer di 8192 per l'analisi in tempo reale
+
 struct SampleCapturer<I> {
     input: I,
     buffer: Arc<Mutex<VecDeque<f32>>>,
     max_size: usize,
 }
-
 impl<I> SampleCapturer<I> {
-    /// Creates a new SampleCapturer.
-    ///
-    /// # Arguments
-    /// * "input"  - The underlying audio source.
-    /// * "buffer" - Shared buffer where captured samples will be stored.
+    // creamo un nuovo capturer che salva i campioni in un buffer condiviso
     fn new(input: I, buffer: Arc<Mutex<VecDeque<f32>>>) -> Self {
         Self {
             input,
             buffer,
+            // dimensione massima del buffer
             max_size: 8192,
         }
     }
@@ -64,14 +54,13 @@ where
     I: Source<Item = f32>,
 {
     type Item = f32;
-
-    /// Returns the next sample from the input source and simultaneously
-    /// appends it to the shared buffer. If the buffer is full, the oldest
-    /// sample is removed to keep the size constant.
+    // propaga il prossimo campione e contemporaneamente lo salva nel buffer
     fn next(&mut self) -> Option<f32> {
         if let Some(sample) = self.input.next() {
             let mut buffer = self.buffer.lock().unwrap();
             if buffer.len() >= self.max_size {
+                // rimuoviamo il piu vecchio
+                // per mantenere la dimensione fissa
                 buffer.pop_front();
             }
             buffer.push_back(sample);
@@ -86,47 +75,42 @@ impl<I> Source for SampleCapturer<I>
 where
     I: Source<Item = f32>,
 {
-    /// Delegates frame length query to the inner source.
+    // implementazione per l'utilizzo di Source in Rodio
     fn current_frame_len(&self) -> Option<usize> {
         self.input.current_frame_len()
     }
 
-    /// Delegates channel count query to the inner source.
     fn channels(&self) -> u16 {
         self.input.channels()
     }
 
-    /// Delegates sample rate query to the inner source.
     fn sample_rate(&self) -> u32 {
         self.input.sample_rate()
     }
 
-    /// Delegates total duration query to the inner source.
     fn total_duration(&self) -> Option<Duration> {
         self.input.total_duration()
     }
 }
 
-/// Central audio playback manager that supports:
-/// - Playback of various formats (mp3, flac, wav, etc.) via rodio
-/// - Volume control
-/// - Real-time sample capture for spectral analysis
-/// - Shared buffer for FFT visualization
+///gestore per riproduzione e audio con supporto a :
+/// - Riproduzione (mp3 - flac - wav , ecc
+/// - controllo volume  
+/// - cattura campioni per analisi spettrale in real time
+/// - buffer condiviso per visualizzare FFT  
 struct AudioPlayer {
-    _stream: OutputStream,
-    stream_handle: OutputStreamHandle,
-    sink: Option<Sink>,
-    volume: f32,
-    audio_buffer: Arc<Mutex<VecDeque<f32>>>,
+    _stream: OutputStream,                   // per tutta la durata del programma
+    stream_handle: OutputStreamHandle,       // usato per creare nuovi sink
+    sink: Option<Sink>,                      // sink corrente permette stop, play e pause
+    volume: f32,                             // volume 0.0 a 1.0
+    audio_buffer: Arc<Mutex<VecDeque<f32>>>, // per analisi del brano
     sample_rate: u32,
-    is_playing: Arc<Mutex<bool>>,
-    total_duration: Option<Duration>,
+    is_playing: Arc<Mutex<bool>>,     // flag per l'utilizzo esterno
+    total_duration: Option<Duration>, // per la durata totale del brano
 }
 
 impl AudioPlayer {
-    /// Initializes the default audio output device using rodio.
-    ///
-    /// Returns an error if the audio device cannot be opened.
+    // inizializza il dispositivo audio (rodio)
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let (_stream, stream_handle) = OutputStream::try_default()
             .map_err(|e| format!("Errore inizializzazione audio: {}", e))?;
@@ -141,13 +125,9 @@ impl AudioPlayer {
             total_duration: None,
         })
     }
-
-    /// Starts playback of the audio file at the given path.
-    ///
-    /// Stops any currently playing track, clears the sample buffer,
-    /// creates a new sink with sample capture and volume amplification,
-    /// and begins playback.
+    // riproduce il file audio dal percorso (path) specificato
     fn play(&mut self, path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        // Ferma e rimuovi il sink precedente
         if let Some(old_sink) = self.sink.take() {
             old_sink.stop();
         }
@@ -155,21 +135,25 @@ impl AudioPlayer {
         *self.is_playing.lock().unwrap() = false;
         self.audio_buffer.lock().unwrap().clear();
 
+        // Crea nuovo sink per la riproduzione
         let sink = Sink::try_new(&self.stream_handle)
             .map_err(|e| format!("Errore creazione sink: {}", e))?;
 
         let file = File::open(path)?;
         let source = Decoder::new(BufReader::new(file))?;
 
+        // informazioni sul file come la durata totale
         self.sample_rate = source.sample_rate();
-        // Cattura la durata PRIMA di convertire i campioni
         self.total_duration = source.total_duration();
 
+        // Converti in f32 e cattura campioni per il buffer condiviso
         let source = source.convert_samples::<f32>();
         let capturer = SampleCapturer::new(source, self.audio_buffer.clone());
 
+        // Applica volume
         let source = capturer.amplify(self.volume);
 
+        // Aggiungi al sink e riproduci
         sink.append(source);
         sink.play();
 
@@ -179,31 +163,26 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Sets the playback volume (clamped between 0.0 and 1.0).
-    /// Updates the current sink if one exists.
+    // funzione per il settaggio del volume (0.0 a 1.0)
     fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
         if let Some(sink) = &self.sink {
             sink.set_volume(self.volume);
         }
     }
-
-    /// Increases the volume by 5%.
+    // aumenta il volume dello 0.05 (5%)
     fn increase_volume(&mut self) {
         self.set_volume(self.volume + 0.05);
     }
-
-    /// Decreases the volume by 5%.
+    // decrementa come sopra
     fn decrease_volume(&mut self) {
         self.set_volume(self.volume - 0.05);
     }
-
-    /// Returns the current volume level (0.0 to 1.0).
+    // restituisce lo stato del volume
     fn get_volume(&self) -> f32 {
         self.volume
     }
-
-    /// Checks whether audio is currently playing by inspecting the sink.
+    // controllo della riproduzione
     fn is_playing(&self) -> bool {
         if let Some(sink) = &self.sink {
             !sink.empty()
@@ -211,34 +190,30 @@ impl AudioPlayer {
             false
         }
     }
-
-    /// Stops playback and clears the current sink.
+    // ferma la riproduzione
     fn stop(&mut self) {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
         *self.is_playing.lock().unwrap() = false;
     }
-
-    /// Returns the total duration of the currently loaded track, if known.
+    // restituisce la durata del brano corrente
     fn get_total_duration(&self) -> Option<Duration> {
         self.total_duration
     }
-
-    /// Retrieves the most recent "count" audio samples from the shared buffer.
-    /// Samples are returned in reverse order (newest first).
+    // Ottiene i campioni audio
     fn get_audio_samples(&self, count: usize) -> Vec<f32> {
         let buffer = self.audio_buffer.lock().unwrap();
         buffer.iter().rev().take(count).copied().collect()
     }
 
-    /// Returns the sample rate of the currently playing track.
     fn get_sample_rate(&self) -> u32 {
         self.sample_rate
     }
 }
 
-/// Main application state holding the file browser, playback info, and visualizer data.
+// Struttura principale della Tui
+
 struct App {
     current_dir: PathBuf,
     items: Vec<PathBuf>,
@@ -258,8 +233,7 @@ struct App {
 }
 
 impl App {
-    /// Creates a new App instance, initializes the audio player,
-    /// loads the current directory contents, and selects the first item.
+    // per la creazione di una nuova istanza
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let current_dir = std::env::current_dir()?;
         let audio_player = AudioPlayer::new()?;
@@ -285,13 +259,12 @@ impl App {
         app.list_state.select(Some(0));
         Ok(app)
     }
-
-    /// Loads the contents of the current directory into "self.items".
-    /// Includes ".." for parent navigation and filters audio files by extension.
+    // carica il contenuto della directory corrente
     fn load_directory(&mut self) -> io::Result<()> {
         self.items.clear();
 
         if self.current_dir.parent().is_some() {
+            // per la tornare alla cartella superiore
             self.items.push(PathBuf::from(".."));
         }
 
@@ -313,8 +286,7 @@ impl App {
         self.items.sort();
         Ok(())
     }
-
-    /// Moves the selection to the next item in the list (wraps around).
+    // selezioniamo l''elemento successivo nella lista
     fn next(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
@@ -328,8 +300,7 @@ impl App {
         };
         self.list_state.select(Some(i));
     }
-
-    /// Moves the selection to the previous item in the list (wraps around).
+    // per l'elemento precedente
     fn previous(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
@@ -343,11 +314,7 @@ impl App {
         };
         self.list_state.select(Some(i));
     }
-
-    /// Handles selection of the currently highlighted item:
-    /// - ".." navigates up one directory
-    /// - Directories open them
-    /// - Audio files start playback
+    // gestione della cartella Enter per riprodurla
     fn select_item(&mut self) -> io::Result<()> {
         if let Some(i) = self.list_state.selected() {
             if i < self.items.len() {
@@ -370,8 +337,7 @@ impl App {
         }
         Ok(())
     }
-
-    /// Starts playback of the track at the given index in the current directory listing.
+    // avvia la riproduzione del brano all'indice specificato
     fn play_track_at_index(&mut self, index: usize) {
         if index < self.items.len() {
             let path = &self.items[index];
@@ -386,13 +352,10 @@ impl App {
                         self.current_track_index = Some(index);
                         self.is_playing = true;
                         self.current_time = Duration::from_secs(0);
-
-                        // Usa la durata effettiva del brano o 0 se non disponibile
                         self.total_time = self
                             .audio_player
                             .get_total_duration()
-                            .unwrap_or(Duration::from_secs(0));
-
+                            .unwrap_or(Duration::from_secs(180));
                         self.playback_start = Some(Instant::now());
                         self.error_message = None;
                     }
@@ -404,10 +367,11 @@ impl App {
         }
     }
 
-    /// Plays the next audio track in the current directory.
-    /// If continuous play is enabled and we reach the end, it wraps to the beginning.
+    // riproduce il brano successivo nella cartella
+    // o torna all'inizio
     fn play_next_track(&mut self) {
         if let Some(current_idx) = self.current_track_index {
+            // Trova il prossimo file audio
             for i in (current_idx + 1)..self.items.len() {
                 let path = &self.items[i];
                 if !path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new("..")) {
@@ -415,6 +379,7 @@ impl App {
                     return;
                 }
             }
+            // Se siamo alla fine, ricomincia dall'inizio se continuous_play è attivo
             if self.continuous_play {
                 for i in 0..current_idx {
                     let path = &self.items[i];
@@ -425,12 +390,13 @@ impl App {
                 }
             }
         }
+        // Nessun brano successivo trovato
         self.is_playing = false;
     }
-
-    /// Plays the previous audio track in the current directory.
+    // riproduce il brano precedente
     fn play_previous_track(&mut self) {
         if let Some(current_idx) = self.current_track_index {
+            // Trova il precedente file audio
             if current_idx > 0 {
                 for i in (0..current_idx).rev() {
                     let path = &self.items[i];
@@ -442,19 +408,18 @@ impl App {
             }
         }
     }
-
-    /// Toggles continuous playback mode (loop through all tracks in folder).
+    // toggle per attiva/disattiva la riproduzione continua
     fn toggle_continuous_play(&mut self) {
         self.continuous_play = !self.continuous_play;
     }
-
-    /// Toggles play/pause. If paused, stops the sink; if stopped, reloads and resumes the current track.
+    // play o pause del brano
     fn toggle_playback(&mut self) {
         if self.selected_track.is_some() {
             if self.is_playing {
                 self.audio_player.stop();
                 self.is_playing = false;
             } else {
+                // Riavvia riproduzione
                 if let Some(track) = self.selected_track.clone() {
                     let _ = self.audio_player.play(&track);
                     self.is_playing = true;
@@ -463,17 +428,12 @@ impl App {
             }
         }
     }
-
-    /// Updates playback state:
-    /// - Checks if the track has finished
-    /// - Advances to next track if continuous play is enabled
-    /// - Updates current time
-    /// - Performs real-time FFT analysis when playing
-    /// - Applies decay to visualizer when not playing
+    // aggiorna lo stato della riproduzione
     fn update_playback(&mut self) {
         let was_playing = self.is_playing;
         self.is_playing = self.audio_player.is_playing();
 
+        // Se il brano è finito e continuous_play è attivo, riproduci il prossimo
         if was_playing && !self.is_playing && self.continuous_play {
             self.play_next_track();
         }
@@ -482,12 +442,14 @@ impl App {
             let elapsed = self.playback_start.unwrap().elapsed();
             self.current_time = elapsed;
 
-            if self.total_time.as_secs() > 0 && self.current_time > self.total_time {
+            if self.current_time > self.total_time {
                 self.current_time = self.total_time;
             }
 
+            // Analizza audio in tempo reale
             self.analyze_audio();
         } else if !self.is_playing {
+            // Decay graduale quando non sta suonando
             for val in self.histogram.iter_mut() {
                 *val *= 0.9;
                 if *val < 0.05 {
@@ -496,11 +458,7 @@ impl App {
             }
         }
     }
-
-    /// Performs real-time FFT analysis on the latest audio samples
-    /// and updates the histogram bars used for visualization.
-    /// Uses logarithmic frequency banding, Hann windowing, adaptive normalization,
-    /// compression, and smoothing for a responsive and pleasant visual effect.
+    // Esegue l'analisi FFT in tenpo reale
     fn analyze_audio(&mut self) {
         const FFT_SIZE: usize = 2048;
         let samples = self.audio_player.get_audio_samples(FFT_SIZE);
@@ -509,27 +467,33 @@ impl App {
             return;
         }
 
+        // Prepara buffer FFT
         let mut buffer: Vec<Complex<f32>> = samples[..FFT_SIZE]
             .iter()
             .map(|&s| Complex::new(s, 0.0))
             .collect();
 
+        // Applica finestra di Hann per ridurre artefatti
         for (i, sample) in buffer.iter_mut().enumerate() {
             let window =
                 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos());
             *sample *= window;
         }
 
+        // Esegui FFT
         let fft = self.fft_planner.plan_fft_forward(FFT_SIZE);
         fft.process(&mut buffer);
 
+        // Converti in magnitudini e mappa alle barre
         let num_bars = self.histogram.len();
         let sample_rate = self.audio_player.get_sample_rate() as f32;
         let freq_per_bin = sample_rate / FFT_SIZE as f32;
 
-        let min_freq: f32 = 60.0;
-        let max_freq: f32 = 16000.0;
+        // Definisci bande di frequenza (logaritmiche)
+        let min_freq: f32 = 60.0; // Aumentato da 20Hz per evitare rumori bassi
+        let max_freq: f32 = 16000.0; // Ridotto da 20kHz
 
+        // Trova la magnitudine massima per normalizzazione adattiva
         let mut max_magnitude = 0.0f32;
 
         for i in 0..num_bars {
@@ -542,6 +506,7 @@ impl App {
             let bin_start = (freq_start / freq_per_bin) as usize;
             let bin_end = ((freq_end / freq_per_bin).min((FFT_SIZE / 2) as f32)) as usize;
 
+            // Calcola magnitudine media per questa banda
             let mut magnitude = 0.0;
             let mut count = 0;
 
@@ -560,12 +525,14 @@ impl App {
             }
         }
 
+        // Normalizzazione adattiva
         let normalization_factor = if max_magnitude > 0.0 {
             1.0 / max_magnitude
         } else {
             1.0
         };
 
+        // Seconda passata per aggiornare le barre
         for i in 0..num_bars {
             let t = i as f32 / num_bars as f32;
             let freq_ratio = (max_freq / min_freq).powf(t);
@@ -590,32 +557,36 @@ impl App {
             if count > 0 {
                 magnitude /= count as f32;
 
+                // Normalizza con fattore adattivo
                 magnitude *= normalization_factor;
 
+                // SENSIBILITÀ: Scala finale (riduci per meno reattività)
                 magnitude *= 0.8;
 
+                // COMPRESSIONE: Comprimi dinamica
                 magnitude = magnitude.powf(0.7);
 
+                // Clamp prima dello smoothing
                 magnitude = magnitude.clamp(0.0, 1.0);
 
+                // SMOOTHING: Interpolazione fluida
                 let smoothing = 0.7;
                 self.histogram[i] = self.histogram[i] * smoothing + magnitude * (1.0 - smoothing);
                 self.histogram[i] = self.histogram[i].clamp(0.05, 0.95);
             }
         }
     }
-
-    /// Formats a Duration as MM:SS string.
+    // formattiamo Duration in MM:SS
     fn format_duration(duration: Duration) -> String {
         let secs = duration.as_secs();
         let mins = secs / 60;
         let secs = secs % 60;
-        format!("{:02}:{:02}", mins, secs)
+        format!("{:02}:{:02}", mins, secs) // stringa restituita 
     }
 }
 
-/// Application entry point: sets up terminal, runs the TUI loop, and restores terminal state on exit.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // attiva modalita raw
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -624,7 +595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new()?;
     let res = run_app(&mut terminal, &mut app);
-
+    // ripristina terminale all'uscita
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -640,7 +611,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Main event loop: updates playback state, redraws UI, and handles keyboard input.
+// loop principale dell'applicazioni TUI
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -668,8 +639,7 @@ fn run_app<B: ratatui::backend::Backend>(
         }
     }
 }
-
-/// Splits the screen horizontally into file browser (40%) and player info (60%).
+// dividiamo il layout orizzontale in due 40% e 60%
 fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -679,8 +649,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_file_browser(f, app, chunks[0]);
     render_player_info(f, app, chunks[1]);
 }
-
-/// Renders the left panel: directory listing with icons and highlight.
+// parte sinistra relativa
 fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .items
@@ -724,8 +693,7 @@ fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
 
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
-
-/// Renders the right panel containing track info, progress, volume, visualizer, and controls.
+// stabiliamo un layout per la parte sinistra
 fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -756,20 +724,14 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     let progress = if app.total_time.as_secs() > 0 {
         (app.current_time.as_secs_f64() / app.total_time.as_secs_f64() * 100.0).min(100.0) as u16
     } else {
-        // Se la durata non è disponibile, mostra 0%
         0
     };
 
-    let time_label = if app.total_time.as_secs() > 0 {
-        format!(
-            "{} / {}",
-            App::format_duration(app.current_time),
-            App::format_duration(app.total_time)
-        )
-    } else {
-        // Se la durata non è disponibile, mostra solo il tempo corrente
-        format!("{} / --:--", App::format_duration(app.current_time))
-    };
+    let time_label = format!(
+        "{} / {}",
+        App::format_duration(app.current_time),
+        App::format_duration(app.total_time)
+    );
 
     let gauge = Gauge::default()
         .block(
@@ -837,7 +799,6 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(controls, chunks[4]);
 }
 
-/// Renders the volume gauge with an appropriate speaker icon.
 fn render_volume_control(f: &mut Frame, app: &App, area: Rect) {
     let volume_percent = (app.audio_player.get_volume() * 100.0) as u16;
     let volume_icon = if volume_percent == 0 {
@@ -860,7 +821,6 @@ fn render_volume_control(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(gauge, area);
 }
 
-/// Renders the real-time frequency spectrum visualizer as colored vertical bars.
 fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -898,7 +858,7 @@ fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
                 Color::Green
             };
 
-            let bar_char = if app.is_playing { "█" } else { "▒" };
+            let bar_char = if app.is_playing { "█" } else { "▓" };
 
             let bar = Paragraph::new(
                 bar_char.repeat(bar_width.min((inner.width - (x_pos - inner.x)) as usize)),
@@ -916,4 +876,3 @@ fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 }
-

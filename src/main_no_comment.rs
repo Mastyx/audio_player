@@ -1,14 +1,3 @@
-// player  audio 100% rust
-/*
-insert dependencies in cargo.toml
-
-[dependencies]
-crossterm = "0.29.0"
-ratatui = "0.29.0"
-rodio = "0.19"
-rustfft = "6.2"
-*/
-
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
@@ -34,22 +23,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Wrapper that captures audio samples from an underlying rodio Source.
-/// It stores the samples in a shared ring buffer (Arc<Mutex<VecDeque<f32>>>)
-/// for real-time FFT visualization while passing the samples unchanged
-/// to the audio output. The buffer is limited to a fixed size (8192 samples).
 struct SampleCapturer<I> {
     input: I,
     buffer: Arc<Mutex<VecDeque<f32>>>,
     max_size: usize,
 }
-
 impl<I> SampleCapturer<I> {
-    /// Creates a new SampleCapturer.
-    ///
-    /// # Arguments
-    /// * "input"  - The underlying audio source.
-    /// * "buffer" - Shared buffer where captured samples will be stored.
     fn new(input: I, buffer: Arc<Mutex<VecDeque<f32>>>) -> Self {
         Self {
             input,
@@ -64,10 +43,6 @@ where
     I: Source<Item = f32>,
 {
     type Item = f32;
-
-    /// Returns the next sample from the input source and simultaneously
-    /// appends it to the shared buffer. If the buffer is full, the oldest
-    /// sample is removed to keep the size constant.
     fn next(&mut self) -> Option<f32> {
         if let Some(sample) = self.input.next() {
             let mut buffer = self.buffer.lock().unwrap();
@@ -86,32 +61,23 @@ impl<I> Source for SampleCapturer<I>
 where
     I: Source<Item = f32>,
 {
-    /// Delegates frame length query to the inner source.
     fn current_frame_len(&self) -> Option<usize> {
         self.input.current_frame_len()
     }
 
-    /// Delegates channel count query to the inner source.
     fn channels(&self) -> u16 {
         self.input.channels()
     }
 
-    /// Delegates sample rate query to the inner source.
     fn sample_rate(&self) -> u32 {
         self.input.sample_rate()
     }
 
-    /// Delegates total duration query to the inner source.
     fn total_duration(&self) -> Option<Duration> {
         self.input.total_duration()
     }
 }
 
-/// Central audio playback manager that supports:
-/// - Playback of various formats (mp3, flac, wav, etc.) via rodio
-/// - Volume control
-/// - Real-time sample capture for spectral analysis
-/// - Shared buffer for FFT visualization
 struct AudioPlayer {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
@@ -124,9 +90,6 @@ struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    /// Initializes the default audio output device using rodio.
-    ///
-    /// Returns an error if the audio device cannot be opened.
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let (_stream, stream_handle) = OutputStream::try_default()
             .map_err(|e| format!("Errore inizializzazione audio: {}", e))?;
@@ -142,11 +105,6 @@ impl AudioPlayer {
         })
     }
 
-    /// Starts playback of the audio file at the given path.
-    ///
-    /// Stops any currently playing track, clears the sample buffer,
-    /// creates a new sink with sample capture and volume amplification,
-    /// and begins playback.
     fn play(&mut self, path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(old_sink) = self.sink.take() {
             old_sink.stop();
@@ -162,7 +120,6 @@ impl AudioPlayer {
         let source = Decoder::new(BufReader::new(file))?;
 
         self.sample_rate = source.sample_rate();
-        // Cattura la durata PRIMA di convertire i campioni
         self.total_duration = source.total_duration();
 
         let source = source.convert_samples::<f32>();
@@ -179,8 +136,6 @@ impl AudioPlayer {
         Ok(())
     }
 
-    /// Sets the playback volume (clamped between 0.0 and 1.0).
-    /// Updates the current sink if one exists.
     fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
         if let Some(sink) = &self.sink {
@@ -188,22 +143,18 @@ impl AudioPlayer {
         }
     }
 
-    /// Increases the volume by 5%.
     fn increase_volume(&mut self) {
         self.set_volume(self.volume + 0.05);
     }
 
-    /// Decreases the volume by 5%.
     fn decrease_volume(&mut self) {
         self.set_volume(self.volume - 0.05);
     }
 
-    /// Returns the current volume level (0.0 to 1.0).
     fn get_volume(&self) -> f32 {
         self.volume
     }
 
-    /// Checks whether audio is currently playing by inspecting the sink.
     fn is_playing(&self) -> bool {
         if let Some(sink) = &self.sink {
             !sink.empty()
@@ -212,7 +163,6 @@ impl AudioPlayer {
         }
     }
 
-    /// Stops playback and clears the current sink.
     fn stop(&mut self) {
         if let Some(sink) = self.sink.take() {
             sink.stop();
@@ -220,25 +170,20 @@ impl AudioPlayer {
         *self.is_playing.lock().unwrap() = false;
     }
 
-    /// Returns the total duration of the currently loaded track, if known.
     fn get_total_duration(&self) -> Option<Duration> {
         self.total_duration
     }
 
-    /// Retrieves the most recent "count" audio samples from the shared buffer.
-    /// Samples are returned in reverse order (newest first).
     fn get_audio_samples(&self, count: usize) -> Vec<f32> {
         let buffer = self.audio_buffer.lock().unwrap();
         buffer.iter().rev().take(count).copied().collect()
     }
 
-    /// Returns the sample rate of the currently playing track.
     fn get_sample_rate(&self) -> u32 {
         self.sample_rate
     }
 }
 
-/// Main application state holding the file browser, playback info, and visualizer data.
 struct App {
     current_dir: PathBuf,
     items: Vec<PathBuf>,
@@ -258,8 +203,6 @@ struct App {
 }
 
 impl App {
-    /// Creates a new App instance, initializes the audio player,
-    /// loads the current directory contents, and selects the first item.
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let current_dir = std::env::current_dir()?;
         let audio_player = AudioPlayer::new()?;
@@ -286,8 +229,6 @@ impl App {
         Ok(app)
     }
 
-    /// Loads the contents of the current directory into "self.items".
-    /// Includes ".." for parent navigation and filters audio files by extension.
     fn load_directory(&mut self) -> io::Result<()> {
         self.items.clear();
 
@@ -314,7 +255,6 @@ impl App {
         Ok(())
     }
 
-    /// Moves the selection to the next item in the list (wraps around).
     fn next(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
@@ -329,7 +269,6 @@ impl App {
         self.list_state.select(Some(i));
     }
 
-    /// Moves the selection to the previous item in the list (wraps around).
     fn previous(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
@@ -344,10 +283,6 @@ impl App {
         self.list_state.select(Some(i));
     }
 
-    /// Handles selection of the currently highlighted item:
-    /// - ".." navigates up one directory
-    /// - Directories open them
-    /// - Audio files start playback
     fn select_item(&mut self) -> io::Result<()> {
         if let Some(i) = self.list_state.selected() {
             if i < self.items.len() {
@@ -371,7 +306,6 @@ impl App {
         Ok(())
     }
 
-    /// Starts playback of the track at the given index in the current directory listing.
     fn play_track_at_index(&mut self, index: usize) {
         if index < self.items.len() {
             let path = &self.items[index];
@@ -386,13 +320,10 @@ impl App {
                         self.current_track_index = Some(index);
                         self.is_playing = true;
                         self.current_time = Duration::from_secs(0);
-
-                        // Usa la durata effettiva del brano o 0 se non disponibile
                         self.total_time = self
                             .audio_player
                             .get_total_duration()
-                            .unwrap_or(Duration::from_secs(0));
-
+                            .unwrap_or(Duration::from_secs(180));
                         self.playback_start = Some(Instant::now());
                         self.error_message = None;
                     }
@@ -404,8 +335,6 @@ impl App {
         }
     }
 
-    /// Plays the next audio track in the current directory.
-    /// If continuous play is enabled and we reach the end, it wraps to the beginning.
     fn play_next_track(&mut self) {
         if let Some(current_idx) = self.current_track_index {
             for i in (current_idx + 1)..self.items.len() {
@@ -428,7 +357,6 @@ impl App {
         self.is_playing = false;
     }
 
-    /// Plays the previous audio track in the current directory.
     fn play_previous_track(&mut self) {
         if let Some(current_idx) = self.current_track_index {
             if current_idx > 0 {
@@ -443,12 +371,10 @@ impl App {
         }
     }
 
-    /// Toggles continuous playback mode (loop through all tracks in folder).
     fn toggle_continuous_play(&mut self) {
         self.continuous_play = !self.continuous_play;
     }
 
-    /// Toggles play/pause. If paused, stops the sink; if stopped, reloads and resumes the current track.
     fn toggle_playback(&mut self) {
         if self.selected_track.is_some() {
             if self.is_playing {
@@ -464,12 +390,6 @@ impl App {
         }
     }
 
-    /// Updates playback state:
-    /// - Checks if the track has finished
-    /// - Advances to next track if continuous play is enabled
-    /// - Updates current time
-    /// - Performs real-time FFT analysis when playing
-    /// - Applies decay to visualizer when not playing
     fn update_playback(&mut self) {
         let was_playing = self.is_playing;
         self.is_playing = self.audio_player.is_playing();
@@ -482,7 +402,7 @@ impl App {
             let elapsed = self.playback_start.unwrap().elapsed();
             self.current_time = elapsed;
 
-            if self.total_time.as_secs() > 0 && self.current_time > self.total_time {
+            if self.current_time > self.total_time {
                 self.current_time = self.total_time;
             }
 
@@ -497,10 +417,6 @@ impl App {
         }
     }
 
-    /// Performs real-time FFT analysis on the latest audio samples
-    /// and updates the histogram bars used for visualization.
-    /// Uses logarithmic frequency banding, Hann windowing, adaptive normalization,
-    /// compression, and smoothing for a responsive and pleasant visual effect.
     fn analyze_audio(&mut self) {
         const FFT_SIZE: usize = 2048;
         let samples = self.audio_player.get_audio_samples(FFT_SIZE);
@@ -605,7 +521,6 @@ impl App {
         }
     }
 
-    /// Formats a Duration as MM:SS string.
     fn format_duration(duration: Duration) -> String {
         let secs = duration.as_secs();
         let mins = secs / 60;
@@ -614,7 +529,6 @@ impl App {
     }
 }
 
-/// Application entry point: sets up terminal, runs the TUI loop, and restores terminal state on exit.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -640,7 +554,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Main event loop: updates playback state, redraws UI, and handles keyboard input.
 fn run_app<B: ratatui::backend::Backend>(
     terminal: &mut Terminal<B>,
     app: &mut App,
@@ -669,7 +582,6 @@ fn run_app<B: ratatui::backend::Backend>(
     }
 }
 
-/// Splits the screen horizontally into file browser (40%) and player info (60%).
 fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -680,24 +592,23 @@ fn ui(f: &mut Frame, app: &mut App) {
     render_player_info(f, app, chunks[1]);
 }
 
-/// Renders the left panel: directory listing with icons and highlight.
 fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .items
         .iter()
         .map(|path| {
             let name = if path.file_name() == Some(std::ffi::OsStr::new("..")) {
-                "📁 ..".to_string()
+                "..".to_string()
             } else if path.is_dir() {
                 format!(
-                    "📁 {}",
+                    "{}",
                     path.file_name()
                         .map(|n| n.to_string_lossy())
                         .unwrap_or_default()
                 )
             } else {
                 format!(
-                    "🎵 {}",
+                    "{}",
                     path.file_name()
                         .map(|n| n.to_string_lossy())
                         .unwrap_or_default()
@@ -707,7 +618,7 @@ fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title = format!(" 📂 {} ", app.current_dir.display());
+    let title = format!(" {} ", app.current_dir.display());
     let list = List::new(items)
         .block(
             Block::default()
@@ -720,12 +631,11 @@ fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("▶ ");
+        .highlight_symbol("> ");
 
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-/// Renders the right panel containing track info, progress, volume, visualizer, and controls.
 fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -747,7 +657,7 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_set(border::ROUNDED)
-                .title(" 🎵 Traccia Corrente ")
+                .title(" Traccia Corrente ")
                 .style(Style::default().fg(Color::Green)),
         )
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -756,27 +666,17 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     let progress = if app.total_time.as_secs() > 0 {
         (app.current_time.as_secs_f64() / app.total_time.as_secs_f64() * 100.0).min(100.0) as u16
     } else {
-        // Se la durata non è disponibile, mostra 0%
         0
     };
 
-    let time_label = if app.total_time.as_secs() > 0 {
-        format!(
-            "{} / {}",
-            App::format_duration(app.current_time),
-            App::format_duration(app.total_time)
-        )
-    } else {
-        // Se la durata non è disponibile, mostra solo il tempo corrente
-        format!("{} / --:--", App::format_duration(app.current_time))
-    };
+    let time_label = format!(
+        "{} / {}",
+        App::format_duration(app.current_time),
+        App::format_duration(app.total_time)
+    );
 
     let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" ⏱️  Progresso "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" Progresso "))
         .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
         .percent(progress)
         .label(time_label);
@@ -786,17 +686,17 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     render_histogram(f, app, chunks[3]);
 
     let status = if app.is_playing {
-        "▶️  Playing"
+        "Playing"
     } else if app.selected_track.is_some() {
-        "⏸️  Paused"
+        "Paused"
     } else {
-        "⏹️  Stopped"
+        "Stopped"
     };
 
     let continuous_status = if app.continuous_play {
-        " | 🔁 Continua: ON"
+        " | Continua: ON"
     } else {
-        " | 🔁 Continua: OFF"
+        " | Continua: OFF"
     };
 
     let mut lines = vec![
@@ -817,13 +717,13 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
         Line::from(""),
-        Line::from("Controls: [Space] Play/Pause | [↑↓/jk] Navigate | [Enter] Select"),
+        Line::from("Controls: [Space] Play/Pause | [Up/Down/jk] Navigate | [Enter] Select"),
         Line::from("          [+/-] Volume | [N] Next | [P] Previous | [C] Continua | [Q] Quit"),
     ];
 
     if let Some(error) = &app.error_message {
         lines.push(Line::from(vec![Span::styled(
-            format!("⚠️  {}", error),
+            format!(" {}", error),
             Style::default().fg(Color::Red),
         )]));
     }
@@ -831,40 +731,38 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     let controls = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" 🎮 Controlli ")
+            .title(" Controlli ")
             .style(Style::default().fg(Color::Magenta)),
     );
     f.render_widget(controls, chunks[4]);
 }
 
-/// Renders the volume gauge with an appropriate speaker icon.
 fn render_volume_control(f: &mut Frame, app: &App, area: Rect) {
     let volume_percent = (app.audio_player.get_volume() * 100.0) as u16;
     let volume_icon = if volume_percent == 0 {
-        "🔇"
+        ""
     } else if volume_percent < 33 {
-        "🔈"
+        ""
     } else if volume_percent < 66 {
-        "🔉"
+        ""
     } else {
-        "🔊"
+        ""
     };
 
     let volume_label = format!("{} {}%", volume_icon, volume_percent);
 
     let gauge = Gauge::default()
-        .block(Block::default().borders(Borders::ALL).title(" 🔊 Volume "))
+        .block(Block::default().borders(Borders::ALL).title(" Volume "))
         .gauge_style(Style::default().fg(Color::Cyan).bg(Color::Black))
         .percent(volume_percent)
         .label(volume_label);
     f.render_widget(gauge, area);
 }
 
-/// Renders the real-time frequency spectrum visualizer as colored vertical bars.
 fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" 📊 Analisi Spettro Audio (FFT Real-Time) ")
+        .title(" Analisi Spettro Audio (FFT Real-Time) ")
         .style(Style::default().fg(Color::Blue));
 
     let inner = block.inner(area);
@@ -898,7 +796,7 @@ fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
                 Color::Green
             };
 
-            let bar_char = if app.is_playing { "█" } else { "▒" };
+            let bar_char = if app.is_playing { "" } else { "" };
 
             let bar = Paragraph::new(
                 bar_char.repeat(bar_width.min((inner.width - (x_pos - inner.x)) as usize)),
@@ -916,4 +814,3 @@ fn render_histogram(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 }
-
