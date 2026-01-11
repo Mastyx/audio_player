@@ -1,4 +1,4 @@
-// player audio 100% rust
+// player  audio 100% rust
 /*
 insert dependencies in cargo.toml
 
@@ -34,7 +34,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Cattura i campioni audio per la visualizzazione FFT in tempo reale
+/// Wrapper that captures audio samples from an underlying rodio Source.
+/// It stores the samples in a shared ring buffer (Arc<Mutex<VecDeque<f32>>>)
+/// for real-time FFT visualization while passing the samples unchanged
+/// to the audio output. The buffer is limited to a fixed size (8192 samples).
 struct SampleCapturer<I> {
     input: I,
     buffer: Arc<Mutex<VecDeque<f32>>>,
@@ -92,64 +95,7 @@ where
     }
 }
 
-/// Source che applica un fade-in morbido all'inizio della riproduzione
-struct FadeInSource<I> {
-    inner: I,
-    start_time: Instant,
-    fade_duration: Duration,
-    target_volume: f32,
-}
-
-impl<I> FadeInSource<I> {
-    fn new(inner: I, fade_seconds: f32) -> Self {
-        Self {
-            inner,
-            start_time: Instant::now(),
-            fade_duration: Duration::from_secs_f32(fade_seconds),
-            target_volume: 1.0,
-        }
-    }
-}
-
-impl<I: Source<Item = f32>> Source for FadeInSource<I> {
-    fn current_frame_len(&self) -> Option<usize> {
-        self.inner.current_frame_len()
-    }
-
-    fn channels(&self) -> u16 {
-        self.inner.channels()
-    }
-
-    fn sample_rate(&self) -> u32 {
-        self.inner.sample_rate()
-    }
-
-    fn total_duration(&self) -> Option<Duration> {
-        self.inner.total_duration()
-    }
-}
-
-impl<I: Source<Item = f32>> Iterator for FadeInSource<I> {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let sample = self.inner.next()?;
-        let elapsed = self.start_time.elapsed();
-
-        let progress = if elapsed >= self.fade_duration {
-            1.0
-        } else {
-            elapsed.as_secs_f32() / self.fade_duration.as_secs_f32()
-        };
-
-        // Curva ease-out quadratica per un fade-in naturale
-        let gain = (1.0 - (1.0 - progress).powi(2)) * self.target_volume;
-
-        Some(sample * gain)
-    }
-}
-
-/// Gestore centrale della riproduzione audio
+/// Central audio playback manager
 struct AudioPlayer {
     _stream: OutputStream,
     stream_handle: OutputStreamHandle,
@@ -159,7 +105,6 @@ struct AudioPlayer {
     sample_rate: u32,
     is_playing: Arc<Mutex<bool>>,
     total_duration: Option<Duration>,
-    crossfade_duration: f32,
 }
 
 impl AudioPlayer {
@@ -175,38 +120,16 @@ impl AudioPlayer {
             sample_rate: 44100,
             is_playing: Arc::new(Mutex::new(false)),
             total_duration: None,
-            crossfade_duration: 2.0,
         })
     }
 
-    fn play(
-        &mut self,
-        path: &PathBuf,
-        use_crossfade: bool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        // Se c'è un sink attivo e vogliamo il crossfade, gestiamo il fade-out
-        if use_crossfade && self.sink.is_some() {
-            if let Some(old_sink) = self.sink.take() {
-                let fade_duration = self.crossfade_duration;
-                let volume = self.volume;
-
-                std::thread::spawn(move || {
-                    let steps = 20;
-                    let step_duration = Duration::from_secs_f32(fade_duration / steps as f32);
-
-                    for i in 0..steps {
-                        let progress = i as f32 / steps as f32;
-                        let new_volume = volume * (1.0 - progress.powi(2));
-                        old_sink.set_volume(new_volume);
-                        std::thread::sleep(step_duration);
-                    }
-
-                    old_sink.stop();
-                });
-            }
-        } else if self.sink.is_some() {
-            self.stop();
+    fn play(&mut self, path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(old_sink) = self.sink.take() {
+            old_sink.stop();
         }
+
+        *self.is_playing.lock().unwrap() = false;
+        self.audio_buffer.lock().unwrap().clear();
 
         let sink = Sink::try_new(&self.stream_handle)
             .map_err(|e| format!("Errore creazione sink: {}", e))?;
@@ -220,20 +143,12 @@ impl AudioPlayer {
         let source = source.convert_samples::<f32>();
         let capturer = SampleCapturer::new(source, self.audio_buffer.clone());
 
-        let fade_in_duration = if use_crossfade {
-            self.crossfade_duration
-        } else {
-            1.5
-        };
+        let source = capturer.amplify(self.volume);
 
-        let fade_in_source = FadeInSource::new(capturer, fade_in_duration);
-        let source_with_volume = fade_in_source.amplify(self.volume);
-
-        sink.append(source_with_volume);
+        sink.append(source);
         sink.play();
 
         self.sink = Some(sink);
-        self.audio_buffer.lock().unwrap().clear();
         *self.is_playing.lock().unwrap() = true;
 
         Ok(())
@@ -260,7 +175,7 @@ impl AudioPlayer {
 
     fn is_playing(&self) -> bool {
         if let Some(sink) = &self.sink {
-            !sink.empty() && !sink.is_paused()
+            !sink.empty()
         } else {
             false
         }
@@ -285,17 +200,9 @@ impl AudioPlayer {
     fn get_sample_rate(&self) -> u32 {
         self.sample_rate
     }
-
-    fn set_crossfade_duration(&mut self, duration: f32) {
-        self.crossfade_duration = duration.clamp(0.5, 5.0);
-    }
-
-    fn get_crossfade_duration(&self) -> f32 {
-        self.crossfade_duration
-    }
 }
 
-/// Stato principale dell'applicazione
+/// Main application state
 struct App {
     current_dir: PathBuf,
     items: Vec<PathBuf>,
@@ -312,7 +219,6 @@ struct App {
     error_message: Option<String>,
     continuous_play: bool,
     current_track_index: Option<usize>,
-    crossfade_triggered: bool,
 }
 
 impl App {
@@ -336,7 +242,6 @@ impl App {
             error_message: None,
             continuous_play: false,
             current_track_index: None,
-            crossfade_triggered: false,
         };
         app.load_directory()?;
         app.list_state.select(Some(0));
@@ -413,22 +318,23 @@ impl App {
                     self.load_directory()?;
                     self.list_state.select(Some(0));
                 } else {
-                    self.play_track_at_index_with_crossfade(i, false);
+                    self.play_track_at_index(i);
                 }
             }
         }
         Ok(())
     }
 
+    // NUOVA FUNZIONE: sincronizza la selezione visiva con il brano corrente
     fn sync_list_selection(&mut self) {
         self.list_state.select(self.current_track_index);
     }
 
-    fn play_track_at_index_with_crossfade(&mut self, index: usize, use_crossfade: bool) {
+    fn play_track_at_index(&mut self, index: usize) {
         if index < self.items.len() {
             let path = &self.items[index];
             if !path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new("..")) {
-                match self.audio_player.play(path, use_crossfade) {
+                match self.audio_player.play(path) {
                     Ok(_) => {
                         self.selected_track = Some(path.clone());
                         self.selected_track_name = path
@@ -438,13 +344,16 @@ impl App {
                         self.current_track_index = Some(index);
                         self.is_playing = true;
                         self.current_time = Duration::from_secs(0);
+
                         self.total_time = self
                             .audio_player
                             .get_total_duration()
                             .unwrap_or(Duration::from_secs(0));
+
                         self.playback_start = Some(Instant::now());
                         self.error_message = None;
-                        self.crossfade_triggered = false;
+
+                        // <<< MODIFICA: sincronizza la selezione nella lista >>>
                         self.sync_list_selection();
                     }
                     Err(e) => {
@@ -456,19 +365,11 @@ impl App {
     }
 
     fn play_next_track(&mut self) {
-        self.play_next_track_internal(false);
-    }
-
-    fn play_next_track_auto(&mut self) {
-        self.play_next_track_internal(true);
-    }
-
-    fn play_next_track_internal(&mut self, use_crossfade: bool) {
         if let Some(current_idx) = self.current_track_index {
             for i in (current_idx + 1)..self.items.len() {
                 let path = &self.items[i];
                 if !path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new("..")) {
-                    self.play_track_at_index_with_crossfade(i, use_crossfade);
+                    self.play_track_at_index(i);
                     return;
                 }
             }
@@ -476,7 +377,7 @@ impl App {
                 for i in 0..current_idx {
                     let path = &self.items[i];
                     if !path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new("..")) {
-                        self.play_track_at_index_with_crossfade(i, use_crossfade);
+                        self.play_track_at_index(i);
                         return;
                     }
                 }
@@ -491,7 +392,7 @@ impl App {
                 for i in (0..current_idx).rev() {
                     let path = &self.items[i];
                     if !path.is_dir() && path.file_name() != Some(std::ffi::OsStr::new("..")) {
-                        self.play_track_at_index_with_crossfade(i, false);
+                        self.play_track_at_index(i);
                         return;
                     }
                 }
@@ -510,7 +411,7 @@ impl App {
                 self.is_playing = false;
             } else {
                 if let Some(track) = self.selected_track.clone() {
-                    let _ = self.audio_player.play(&track, false);
+                    let _ = self.audio_player.play(&track);
                     self.is_playing = true;
                     self.playback_start = Some(Instant::now());
                 }
@@ -518,19 +419,13 @@ impl App {
         }
     }
 
-    fn increase_crossfade(&mut self) {
-        let current = self.audio_player.get_crossfade_duration();
-        self.audio_player.set_crossfade_duration(current + 0.5);
-    }
-
-    fn decrease_crossfade(&mut self) {
-        let current = self.audio_player.get_crossfade_duration();
-        self.audio_player.set_crossfade_duration(current - 0.5);
-    }
-
     fn update_playback(&mut self) {
         let was_playing = self.is_playing;
         self.is_playing = self.audio_player.is_playing();
+
+        if was_playing && !self.is_playing && self.continuous_play {
+            self.play_next_track();
+        }
 
         if self.is_playing && self.playback_start.is_some() {
             let elapsed = self.playback_start.unwrap().elapsed();
@@ -540,27 +435,8 @@ impl App {
                 self.current_time = self.total_time;
             }
 
-            // Crossfade anticipato: inizia X secondi prima della fine
-            if self.continuous_play && !self.crossfade_triggered && self.total_time.as_secs() > 0 {
-                let time_remaining = self.total_time.saturating_sub(self.current_time);
-                let crossfade_start =
-                    Duration::from_secs_f32(self.audio_player.get_crossfade_duration());
-
-                // Inizia il crossfade quando manca esattamente la durata del crossfade
-                if time_remaining <= crossfade_start && time_remaining > Duration::from_millis(100)
-                {
-                    self.crossfade_triggered = true;
-                    self.play_next_track_auto();
-                }
-            }
-
             self.analyze_audio();
         } else if !self.is_playing {
-            // Fallback: se il brano finisce senza crossfade
-            if was_playing && self.continuous_play && !self.crossfade_triggered {
-                self.play_next_track_auto();
-            }
-
             for val in self.histogram.iter_mut() {
                 *val *= 0.9;
                 if *val < 0.05 {
@@ -583,7 +459,6 @@ impl App {
             .map(|&s| Complex::new(s, 0.0))
             .collect();
 
-        // Finestra di Hann
         for (i, sample) in buffer.iter_mut().enumerate() {
             let window =
                 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos());
@@ -616,7 +491,7 @@ impl App {
             let mut count = 0;
 
             for bin in bin_start..bin_end {
-                if bin < buffer.len() / 2 {
+                if bin < buffer.len() {
                     let mag =
                         (buffer[bin].re * buffer[bin].re + buffer[bin].im * buffer[bin].im).sqrt();
                     magnitude += mag;
@@ -650,7 +525,7 @@ impl App {
             let mut count = 0;
 
             for bin in bin_start..bin_end {
-                if bin < buffer.len() / 2 {
+                if bin < buffer.len() {
                     magnitude +=
                         (buffer[bin].re * buffer[bin].re + buffer[bin].im * buffer[bin].im).sqrt();
                     count += 1;
@@ -659,9 +534,13 @@ impl App {
 
             if count > 0 {
                 magnitude /= count as f32;
+
                 magnitude *= normalization_factor;
+
                 magnitude *= 0.8;
+
                 magnitude = magnitude.powf(0.7);
+
                 magnitude = magnitude.clamp(0.0, 1.0);
 
                 let smoothing = 0.7;
@@ -725,8 +604,6 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('n') => app.play_next_track(),
                     KeyCode::Char('p') => app.play_previous_track(),
                     KeyCode::Char('c') => app.toggle_continuous_play(),
-                    KeyCode::Char('[') => app.decrease_crossfade(),
-                    KeyCode::Char(']') => app.increase_crossfade(),
                     _ => {}
                 }
             }
@@ -745,12 +622,6 @@ fn ui(f: &mut Frame, app: &mut App) {
 }
 
 fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
-    // Dividi l'area in due parti: lista file e firma
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(4)])
-        .split(area);
-
     let items: Vec<ListItem> = app
         .items
         .iter()
@@ -791,34 +662,7 @@ fn render_file_browser(f: &mut Frame, app: &mut App, area: Rect) {
         )
         .highlight_symbol("▶ ");
 
-    f.render_stateful_widget(list, chunks[0], &mut app.list_state);
-
-    // Render della firma "Player Audio by Mastyx Dev"
-    let signature_lines = vec![
-        Line::from(Span::styled(
-            " > - Player Audio - < ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            "by Mastyx Dev",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::ITALIC),
-        )),
-    ];
-
-    let signature = Paragraph::new(signature_lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .style(Style::default().fg(Color::DarkGray)),
-        )
-        .alignment(ratatui::layout::Alignment::Center);
-
-    f.render_widget(signature, chunks[1]);
+    f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
 fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
@@ -829,7 +673,7 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(6),
+            Constraint::Length(5),
         ])
         .split(area);
 
@@ -868,7 +712,7 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" ⏱️ Progresso "),
+                .title(" ⏱️  Progresso "),
         )
         .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
         .percent(progress)
@@ -879,11 +723,11 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     render_histogram(f, app, chunks[3]);
 
     let status = if app.is_playing {
-        "▶️ Playing"
+        "▶️  Playing"
     } else if app.selected_track.is_some() {
-        "⏸️ Paused"
+        "⏸️  Paused"
     } else {
-        "⏹️ Stopped"
+        "⏹️  Stopped"
     };
 
     let continuous_status = if app.continuous_play {
@@ -891,11 +735,6 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
     } else {
         " | 🔁 Continua: OFF"
     };
-
-    let crossfade_info = format!(
-        " | ⏲️ Crossfade: {:.1}s",
-        app.audio_player.get_crossfade_duration()
-    );
 
     let mut lines = vec![
         Line::from(vec![
@@ -913,17 +752,15 @@ fn render_player_info(f: &mut Frame, app: &App, area: Rect) {
                     Color::DarkGray
                 }),
             ),
-            Span::styled(&crossfade_info, Style::default().fg(Color::Yellow)),
         ]),
         Line::from(""),
         Line::from("Controls: [Space] Play/Pause | [↑↓/jk] Navigate | [Enter] Select"),
-        Line::from("          [+/-] Volume | [N] Next | [P] Previous | [C] Continua"),
-        Line::from("          [[/]] Crossfade Duration | [Q] Quit"),
+        Line::from("          [+/-] Volume | [N] Next | [P] Previous | [C] Continua | [Q] Quit"),
     ];
 
     if let Some(error) = &app.error_message {
         lines.push(Line::from(vec![Span::styled(
-            format!("⚠️ {}", error),
+            format!("⚠️  {}", error),
             Style::default().fg(Color::Red),
         )]));
     }
